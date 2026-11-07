@@ -8,7 +8,8 @@ from app.validation import ValidatedPatient
 logger = logging.getLogger(__name__)
 
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-REQUEST_TIMEOUT_SECONDS = 20.0
+REQUEST_TIMEOUT = httpx.Timeout(connect=10.0, read=45.0, write=10.0, pool=10.0)
+MAX_ATTEMPTS = 2
 MAX_REMARKS_LENGTH = 2000
 DISCLAIMER = (
     "This is general information only and is not a medical diagnosis. "
@@ -29,14 +30,33 @@ Blood test values:
 - Total cholesterol: {cholesterol} mmol/L
 """
 
-
 class AIRemarksError(Exception):
     pass
-
 
 def is_configured() -> bool:
     return get_settings().gemini_api_key is not None
 
+def _post_with_retry(url: str, api_key: str, payload: dict) -> httpx.Response:
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            return httpx.post(
+                url,
+                headers={"x-goog-api-key": api_key},
+                json=payload,
+                timeout=REQUEST_TIMEOUT,
+            )
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            logger.warning(
+                "Gemini request attempt %s of %s failed: %s",
+                attempt,
+                MAX_ATTEMPTS,
+                exc.__class__.__name__,
+            )
+            if attempt == MAX_ATTEMPTS:
+                raise AIRemarksError("The AI service did not respond in time.") from exc
+        except httpx.HTTPError as exc:
+            logger.warning("Gemini request failed: %s", exc.__class__.__name__)
+            raise AIRemarksError("The AI service could not be reached.") from exc
 
 def generate_remarks(patient: ValidatedPatient) -> str:
     settings = get_settings()
@@ -50,18 +70,17 @@ def generate_remarks(patient: ValidatedPatient) -> str:
     )
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 400},
+        "generationConfig": {
+            "temperature": 0.3,
+            "maxOutputTokens": 1024,
+            "thinkingConfig": {"thinkingLevel": "LOW"},
+        },
     }
-    try:
-        response = httpx.post(
-            GEMINI_ENDPOINT.format(model=settings.gemini_model),
-            headers={"x-goog-api-key": settings.gemini_api_key},
-            json=payload,
-            timeout=REQUEST_TIMEOUT_SECONDS,
-        )
-    except httpx.HTTPError as exc:
-        logger.warning("Gemini request failed: %s", exc.__class__.__name__)
-        raise AIRemarksError("The AI service could not be reached.") from exc
+    response = _post_with_retry(
+        GEMINI_ENDPOINT.format(model=settings.gemini_model),
+        settings.gemini_api_key,
+        payload,
+    )
 
     if response.status_code != 200:
         logger.warning("Gemini returned HTTP %s", response.status_code)
@@ -76,3 +95,4 @@ def generate_remarks(patient: ValidatedPatient) -> str:
     if not text:
         raise AIRemarksError("The AI service returned an empty response.")
     return f"{text[:MAX_REMARKS_LENGTH]}\n\n{DISCLAIMER}"
+
