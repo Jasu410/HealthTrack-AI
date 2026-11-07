@@ -26,6 +26,6 @@ def get_settings() -> Settings:
     return Settings(
         database_path=Path(os.getenv("DATABASE_PATH", str(DEFAULT_DATABASE_PATH))),
         gemini_api_key=api_key,
-        gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+        gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
         cors_origins=[origin.strip() for origin in origins.split(",") if origin.strip()],
     )
